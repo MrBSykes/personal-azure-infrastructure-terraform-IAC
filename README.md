@@ -1,4 +1,4 @@
-# 🏗️ Personal Azure Infrastructure w/Terraform IaC
+# 🏗️ Personal Azure Infrastructure with Terraform IaC
 ### Hub & Spoke Network · NSGs · Private VM · Private Endpoints · Remote State
 
 ![Terraform](https://img.shields.io/badge/Terraform-IaC-7B42BC?style=for-the-badge&logo=terraform&logoColor=white)
