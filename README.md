@@ -214,7 +214,7 @@ terraform destroy
 
 ## AZ-900 / AZ-104 Alignment
 
-This project maps to Azure Administrator (AZ-104) exam objectives — a natural next certification after AZ-900:
+This project maps to Azure Administrator (AZ-104) exam objectives. The next certification after AZ-900:
 
 | AZ-104 Domain | Coverage |
 |---|---|
