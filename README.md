@@ -10,7 +10,8 @@
 
 ## Overview
 
-> **Documentation coming soon — project begins post AZ-900 exam (September 24, 2026)**
+> **Documentation coming soon. Project begins post AZ-900 exam (September 24, 2026)**
+Update: Officially AZ-900 Certififed!
 
 This project builds a complete, secure, repeatable Azure environment using **Terraform Infrastructure as Code (IaC)** — no manual portal clicks, no one-off CLI commands. Every resource is defined in code, versioned in Git, and deployable consistently across development and production environments with a single `terraform apply`.
 
