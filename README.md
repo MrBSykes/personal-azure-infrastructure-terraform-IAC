@@ -13,7 +13,7 @@
 > **Documentation coming soon. Project begins post AZ-900 exam (September 24, 2026)**
 Update: Officially AZ-900 Certififed!
 
-This project builds a complete, secure, repeatable Azure environment using **Terraform Infrastructure as Code (IaC)** — no manual portal clicks, no one-off CLI commands. Every resource is defined in code, versioned in Git, and deployable consistently across development and production environments with a single `terraform apply`.
+This project builds a complete, secure, repeatable Azure environment using **Terraform Infrastructure as Code (IaC)**. No manual portal clicks, no one-off CLI commands. Every resource is defined in code, versioned in Git, and deployable consistently across development and production environments with a single `terraform apply`.
 
 This is the next phase of the home lab Azure portfolio, building on the CLI-based work documented in:
 - [Linux to Azure — Phase 1: Automated Log Backup](#)
