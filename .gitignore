@@ -5,3 +5,11 @@
 *.tfvars
 crash.log
 override.tf
+*.tfplan
+.terraform.tfstate.lock.info
+
+# OS / editor
+~$*
+Thumbs.db
+desktop.ini
+.DS_Store

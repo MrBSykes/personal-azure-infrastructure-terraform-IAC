@@ -16,7 +16,7 @@ terraform {
 
 provider "azurerm" {
   features {}
-  subscription_id                 = "ed6e958b-2f8b-475b-a5e4-97595e1b4beb"
+  subscription_id = var.subscription_id
 }
  resource "azurerm_resource_group" "hub" {
   name     = "hub-rg"
@@ -176,7 +176,7 @@ resource "azurerm_subnet_network_security_group_association" "dev_nsg_assoc" {
 #
 #  admin_ssh_key {
 #    username   = "azureadmin"
-#    public_key = file("C:/Users/bball/.ssh/id_rsa_azure.pub")
+#    public_key = file("~/.ssh/id_rsa_azure.pub")
 #  }
 #
 #  os_disk {
