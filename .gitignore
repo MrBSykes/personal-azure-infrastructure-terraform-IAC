@@ -3,6 +3,7 @@
 *.tfstate
 *.tfstate.backup
 *.tfvars
+!spokes.auto.tfvars
 crash.log
 override.tf
 *.tfplan
