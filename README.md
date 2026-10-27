@@ -1,24 +1,80 @@
 # 🏗️ Personal Azure Infrastructure with Terraform IaC
-### Hub & Spoke Network · NSGs · Private Endpoint · Remote State
+### Hub & Spoke Network · Least-Privilege NSGs · Private Storage · Modules · Remote State
 
 ![Terraform](https://img.shields.io/badge/Terraform-IaC-7B42BC?style=for-the-badge&logo=terraform&logoColor=white)
 ![Azure](https://img.shields.io/badge/Azure-Hub_%26_Spoke-0078D4?style=for-the-badge&logo=microsoftazure&logoColor=white)
-![Status](https://img.shields.io/badge/Status-Core_Deployed-2ea44f?style=for-the-badge)
+![Status](https://img.shields.io/badge/Status-20_Resources_Deployed-2ea44f?style=for-the-badge)
 ![Security](https://img.shields.io/badge/Security-Default_Deny-critical?style=for-the-badge)
+
+A secure, repeatable Azure environment defined entirely in Terraform: no portal clicks to build it, every resource in version control, and a new environment added by editing one data file.
+
+**Jump to:** [The problem](#1-the-business-problem) · [Resources and why](#2-azure-resources-and-why-they-are-here) · [Architecture decisions](#3-key-architectural-decisions) · [Deploy it](#4-how-to-deploy) · [Docs](#documentation)
 
 ---
 
-## Overview
+## 1. The Business Problem
 
-This project defines a secure, repeatable Azure environment entirely in Terraform: no portal clicks to build it, and every resource lives in code under version control. Hub and spoke networking, a least-privilege network security group, a storage account reachable only through a private endpoint, and Terraform state kept in Azure Blob Storage.
+Organizations, federal contractors especially, rebuild the same environment types (dev, staging, production, recovery) again and again across projects and security boundaries. Built by hand in a portal, that creates three recurring problems:
 
-It is the next step after my CLI-based work in [Linux to Azure: Automated Log Backup](https://github.com/MrBSykes/linux-to-azure-automated-syslog-backup). That project built and verified resources by hand with the Azure CLI. This one defines them as code so the same environment can be rebuilt or destroyed with one command.
+| Problem | What it costs | How this project addresses it |
+|---|---|---|
+| **Inconsistency**: two people clicking through the portal build slightly different environments | Audit findings (FedRAMP, CMMC), hard-to-trace bugs, security drift between dev and prod | Prod is built from the same modules as dev, so parity is guaranteed by construction |
+| **No audit trail**: portal changes leave no reviewable record | Cannot prove what was built, when, or by whom | Git history plus reviewed `terraform plan` output is the change record |
+| **Slow, error-prone rebuilds**: recreating a network by hand takes days | Long recovery after an incident; slow onboarding of new contracts | `terraform apply` rebuilds the environment in minutes; adding an environment is a data change |
 
-**Status:** 20 resources deployed and tracked in Terraform state, built from three reusable modules. The Linux VM and Azure Bastion are written and plan cleanly, but sit behind cost switches that default to off (see [What is and is not built](#what-is-and-is-not-built)).
+It also addresses two security problems common to cloud environments: **flat networks** (one compromised host reaches everything) and **publicly reachable storage** (a leading cause of cloud data exposure). Both are closed by default here.
 
-Write-ups:
-- **[Version 2 (October 2026)](docs/personal-azure-infrastructure-terraform-documentation-v2.pdf)**: module refactor, prod controls, what each component does in Azure, the business problem it solves, and what I would do differently next time.
-- [Original write-up (September 2026)](docs/personal-azure-infrastructure-terraform-documentation.pdf): the first version, kept for the project history.
+This project is the next step after my CLI-based work in [Linux to Azure: Automated Log Backup](https://github.com/MrBSykes/linux-to-azure-automated-syslog-backup). That project built resources by hand with the Azure CLI; this one defines them as code.
+
+**Status:** 20 resources deployed and tracked in Terraform state, built from three reusable modules. A Linux VM and Azure Bastion are written and plan cleanly, but sit behind cost switches that default to off.
+
+---
+
+## 2. Azure Resources and Why They Are Here
+
+Every resource has a job. Nothing is included just to make the diagram look fuller.
+
+| Resource | Count | Why it is here | Business problem it solves |
+|---|---|---|---|
+| **Resource groups** (`hub-rg`, `dev-rg`, `prod-rg`) | 3 | One lifecycle and permission boundary per environment | Clean ownership, cost tracking per environment, and safe teardown of one environment without touching another |
+| **Virtual networks** (`hub-vnet` 10.0.0.0/16, `dev-vnet` 10.1.0.0/16, `prod-vnet` 10.2.0.0/16) | 3 | Isolated private networks with non-overlapping address space | Environment isolation; overlapping ranges make later connections impossible, so the IP plan comes first |
+| **VNet peerings** (hub-to-dev, dev-to-hub, hub-to-prod, prod-to-hub) | 4 | Connect each spoke to the hub over the Microsoft backbone. Peering must be created from both sides | Shared services live once in the hub instead of being duplicated per environment |
+| **Subnets** (`GatewaySubnet`, dev and prod `private-subnet`) | 3 | `GatewaySubnet` is reserved for a future VPN or ExpressRoute gateway. Private subnets hold workloads and are where NSGs attach | Gives policy something to attach to; subnet-level control is the unit auditors review |
+| **Network security groups** (`dev-nsg`, `prod-nsg`) and associations | 4 | Stateful packet filter on each private subnet: default deny inbound, SSH only from the hub, HTTPS outbound | Limits blast radius; a short, readable rule list for an audit |
+| **Storage accounts** (`sykesdevstore`, `sykesprodstore`) | 2 | TLS 1.2, default-deny network rules, public network access off, anonymous blob access off | Removes the most common cloud data-exposure paths at the resource level |
+| **Private endpoint** (`dev-storage-pe`) and its NIC | 1 (+NIC) | Gives the dev blob service a private IP inside the dev subnet, the only path in once public access is off | Storage reachable from the private network without ever crossing the public internet |
+| **Remote state** (`TerraformStateRG` / `sykestfstate` / `tfstate`) | created with CLI | Holds Terraform state in Azure Blob with lease locking | State is the record of what Terraform manages; on one laptop it is a single point of failure |
+| **Linux VM + Azure Bastion** (switch, default off) | 5 when on | A no-public-IP VM and a managed access path to it | Remote administration without exposing ports 22 or 3389 to the internet |
+
+---
+
+## 3. Key Architectural Decisions
+
+Each decision is recorded with the reasoning and the trade-off accepted.
+
+| # | Decision | Reasoning | Trade-off / what I would change |
+|---|---|---|---|
+| 1 | **Hub-and-spoke topology** | Standard enterprise layout: shared services in one hub, workloads in isolated spokes | More moving parts than one flat VNet. Peering is non-transitive and no firewall exists, so spokes are *isolated*, not *inspected*. Inspection would need Azure Firewall plus user-defined routes |
+| 2 | **Dev and prod peer only to the hub, never to each other** | A compromise in one environment has no direct network path to the other | Cross-environment traffic needs a deliberate change |
+| 3 | **Three non-overlapping /16 ranges planned up front** | Overlapping address space blocks peering and cannot be fixed without rebuilding the network | Generous ranges; a real deployment would track allocations in an IPAM table |
+| 4 | **Explicit `deny-all-inbound` at priority 4096** | Azure treats peered networks as part of the `VirtualNetwork` tag, so the default `AllowVnetInBound` rule (65000) would let the hub reach every port. An explicit deny at 4096 is evaluated first and closes that | Outbound is **not** default-deny: the default `AllowInternetOutBound` (65001) is still in force, so the HTTPS rule documents intent but restricts nothing. A fuller design adds deny-all outbound and flow logs |
+| 5 | **SSH allowed only from the hub address range** | Least privilege: management access comes from the shared-services network, never the internet | Fixed source range; would move to application security groups once VMs exist |
+| 6 | **Storage: public access off + private endpoint** | Closes public exposure at the resource, not by relying on users to behave | The private endpoint bills hourly plus per GB (about $7 to $8 a month), and **no private DNS zone is linked yet**, so private name resolution is not demonstrated. Endpoint and DNS zone should ship as one unit |
+| 7 | **Reusable modules; environments defined as data** (`spokes.auto.tfvars`, `for_each`) | One definition applied everywhere: prod matches dev by construction, and adding an environment is a data change | I retrofitted modules after building a flat config. Writing the module before the second environment exists avoids the refactor |
+| 8 | **`moved` blocks for the refactor** | Tells Terraform an old address and a new address are the same real resource, so state is renamed instead of destroy-and-recreate. 14 resources moved; the plan ended at 0 add, 0 change, 0 destroy | Needs a state backup and a plan review before any apply |
+| 9 | **State in a separate storage account, created with the CLI** | Terraform cannot store state in a resource it has not yet created. It also let state survive a disabled subscription: after upgrading, `plan` reported "No changes" | One state file holds hub, dev and prod, so a bad dev apply could reach prod. Better: one state per environment, with versioning and soft delete |
+| 10 | **VM and Bastion behind `enable_vm` / `enable_bastion` switches (default false)** | Anything billed hourly should be a deliberate decision. The code is reviewable and the plan is the evidence (5 to add), but nothing runs | A timed demo (apply, capture, destroy) is needed for live screenshots. Cross-region Bastion over global peering is unproven until applied |
+| 11 | **Bastion Basic SKU, not Developer** | The free Developer SKU does not support VNet peering, so it cannot reach a VM in a spoke from the hub | Basic is dedicated and billed hourly from creation, which is why it stays off |
+| 12 | **`subscription_id` through an environment variable** | Keeps identifiers out of files and out of Git | Slightly more setup per shell session |
+| 13 | **Hub and dev in different regions** | An artifact of free-tier VM capacity trouble during the original build | Makes hub-to-dev a global peering with per-GB data charges. A fresh build would use one region |
+
+### Known limitations (stated, not hidden)
+
+- No private DNS zone for the storage private endpoint yet
+- Outbound NSG traffic is not default-deny and there are no flow logs
+- Single state file for all environments
+- VM and Bastion are not deployed, so cross-region Bastion access is unverified
+- Spokes are isolated but not inspected (no firewall or route tables)
 
 ---
 
@@ -28,6 +84,7 @@ Write-ups:
                   ┌───────────────────────────┐
                   │ hub-vnet  10.0.0.0/16     │
                   │ GatewaySubnet 10.0.0.0/24 │
+                  │ (AzureBastionSubnet 10.0.1.0/26, off by default)
                   └─────────┬───────────┬─────┘
                   VNet peering         VNet peering
                   (both directions)    (both directions)
@@ -46,32 +103,131 @@ Write-ups:
 Remote state: TerraformStateRG / sykestfstate / tfstate
 ```
 
-Dev and prod are peered only to the hub, never to each other, so a compromise in one spoke has no direct path to the other.
+### NSG rules (`dev-nsg` and `prod-nsg`)
+
+| Rule | Priority | Direction | Source | Port | Action |
+|---|---|---|---|---|---|
+| allow-ssh-inbound | 100 | Inbound | 10.0.0.0/16 (hub range) | 22 | Allow |
+| allow-https-outbound | 200 | Outbound | Any | 443 to Internet | Allow |
+| deny-all-inbound | 4096 | Inbound | Any | Any | Deny |
 
 ---
 
-## What is and is not built
+## 4. How to Deploy
 
-| # | Component | Status |
-|---|---|---|
-| 1 | Hub and spoke VNets with bidirectional peering (hub-dev, hub-prod) | ✅ Deployed |
-| 2 | Network security group on the dev private subnet (default deny inbound, SSH only from the hub range, HTTPS outbound) | ✅ Deployed |
-| 3 | Storage account `sykesdevstore` with public network access off, plus a blob private endpoint in the dev subnet | ✅ Deployed |
-| 4 | Remote state in Azure Blob Storage (`sykestfstate`) | ✅ Deployed |
-| 5 | Linux VM in the dev private subnet, no public IP | ⏸ Code complete behind `enable_vm` (default off). Plans cleanly; not deployed to keep cost at zero. Free-tier B-series capacity was unavailable during the original build |
-| 6 | Azure Bastion (Basic SKU) in the hub | ⏸ Code complete behind `enable_bastion` (default off). Plans cleanly (5 resources with the VM); billed hourly, so reserved for a timed demo |
-| 7 | NSG and storage account in the prod spoke | ✅ Deployed (same baseline NSG; storage with public access off and no private endpoint, a cost trade-off) |
-| 8 | Refactor into modules, spokes defined as data | ✅ Done. 14 resources moved into modules with `moved` blocks and a zero-destroy plan |
+### Prerequisites
 
----|---|---|
-| 1 | Hub and spoke VNets with bidirectional peering (hub-dev, hub-prod) | ✅ Deployed |
-| 2 | Network security group on the dev private subnet (default deny inbound, SSH only from the hub range, HTTPS outbound) | ✅ Deployed |
-| 3 | Storage account `sykesdevstore` with public access denied, plus a blob private endpoint in the dev subnet | ✅ Deployed |
-| 4 | Remote state in Azure Blob Storage (`sykestfstate`) | ✅ Deployed |
-| 5 | Linux VM in the dev private subnet, no public IP | ⏸ Code written, commented out. Azure free tier had no B-series capacity in East US or East US 2 |
-| 6 | Azure Bastion in the hub | 🔲 Planned |
-| 7 | NSG and storage account in the prod spoke | 🔲 Planned |
-| 8 | Refactor into modules, dev/prod tfvars | 🔲 Planned |
+- [Terraform](https://developer.hashicorp.com/terraform/install) 1.3 or newer (`winget install HashiCorp.Terraform` on Windows)
+- [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli), signed in with `az login`
+- An Azure subscription where you can create resources (a pay-as-you-go or trial subscription works; the core build costs very little, see [Cost](#cost))
+- Git
+
+### Step 1: Clone the repository
+
+```bash
+git clone https://github.com/MrBSykes/personal-azure-infrastructure-terraform-IAC.git
+cd personal-azure-infrastructure-terraform-IAC/terraform
+```
+
+### Step 2: Create the remote state backend (once, with the CLI)
+
+Terraform cannot store state in a resource it has not yet created, so this one piece is built by hand.
+
+```bash
+az group create --name TerraformStateRG --location eastus
+
+az storage account create \
+  --name <your-unique-state-account> \
+  --resource-group TerraformStateRG \
+  --location eastus \
+  --sku Standard_LRS \
+  --min-tls-version TLS1_2
+
+az storage container create \
+  --name tfstate \
+  --account-name <your-unique-state-account>
+```
+
+Storage account names are globally unique (3 to 24 lowercase letters and digits). Update the `backend` block in `terraform/providers.tf` to match your account name.
+
+### Step 3: Make the names yours
+
+Edit `terraform/spokes.auto.tfvars`. The storage account names (`sykesdevstore`, `sykesprodstore`) are taken, so choose your own. This file holds no secrets, so it is committed on purpose.
+
+```hcl
+spokes = {
+  dev = {
+    location             = "eastus2"
+    address_space        = "10.1.0.0/16"
+    subnet_prefix        = "10.1.1.0/24"
+    storage_account_name = "<your-unique-dev-name>"
+    private_endpoint     = true        # costs money per hour; set false to skip
+  }
+  prod = {
+    location             = "eastus"
+    address_space        = "10.2.0.0/16"
+    subnet_prefix        = "10.2.1.0/24"
+    storage_account_name = "<your-unique-prod-name>"
+  }
+}
+```
+
+Adding an environment is a new entry in this map, not new code.
+
+### Step 4: Set your subscription
+
+```powershell
+# PowerShell
+$env:TF_VAR_subscription_id = az account show --query id -o tsv
+```
+```bash
+# bash
+export TF_VAR_subscription_id=$(az account show --query id -o tsv)
+```
+
+The ID travels through the environment, so it never lands in a file. (Alternatively, copy `terraform.tfvars.example` to `terraform.tfvars`, which is gitignored.)
+
+### Step 5: Run Terraform
+
+```bash
+terraform init      # downloads the provider, installs modules, configures the backend
+terraform fmt       # optional: format
+terraform validate  # optional: check syntax
+terraform plan      # review exactly what will be created
+terraform apply     # build it (type yes)
+```
+
+A fresh deployment creates 20 resources. Always read the plan before applying.
+
+### Optional: preview the VM and Bastion (costs nothing)
+
+The VM and Bastion are off by default. To see what they would add without creating anything:
+
+```bash
+terraform plan -var enable_vm=true -var enable_bastion=true -var 'ssh_public_key=<your RSA public key>'
+```
+
+This shows 5 resources to add. **Do not apply it casually:** Bastion bills hourly from creation until deletion. If you do a demo, apply, capture screenshots, and `terraform destroy` in the same sitting. Azure Linux VMs require an RSA key, not ED25519.
+
+### Tear it down
+
+```bash
+terraform destroy
+```
+
+This removes everything Terraform manages. The state account created in Step 2 is separate and stays until you delete it.
+
+### Cost
+
+| Item | Cost behavior |
+|---|---|
+| VNets, peerings (same region), NSGs, resource groups | Free |
+| Storage accounts | Pennies at this usage |
+| Dev private endpoint | About $0.01 per hour plus per GB, so roughly $7 to $8 a month. Set `private_endpoint = false` to avoid it |
+| Global peering (hub East US to dev East US 2) | Per GB of data transferred |
+| Azure Bastion (Basic) | Hourly while it exists; off by default |
+
+Set a low budget alert in Cost Management before applying anything billable. Pay-as-you-go has no hard cap, and a budget alert emails you but does not stop spending.
 
 ---
 
@@ -102,90 +258,6 @@ Dev and prod are peered only to the hub, never to each other, so a compromise in
 └── screenshots/                   # Azure portal screenshots of the deployed resources
 ```
 
-Adding an environment is a new entry in `spokes.auto.tfvars`, not new code.
-
----
-
-## Resources deployed
-
-| Area | Resources |
-|---|---|
-| Resource groups | `hub-rg` (East US), `dev-rg` (East US 2), `prod-rg` (East US) |
-| Networks | `hub-vnet` 10.0.0.0/16, `dev-vnet` 10.1.0.0/16, `prod-vnet` 10.2.0.0/16 |
-| Subnets | `GatewaySubnet` 10.0.0.0/24, dev `private-subnet` 10.1.1.0/24, prod `private-subnet` 10.2.1.0/24 |
-| Peerings | hub-to-dev, dev-to-hub, hub-to-prod, prod-to-hub |
-| Security | `dev-nsg` and `prod-nsg` (same baseline rules), each associated to its private subnet |
-| Storage | `sykesdevstore` and `sykesprodstore` (TLS 1.2, default action Deny, public network access off, anonymous blob access off) and the `dev-storage-pe` private endpoint |
-| State | `TerraformStateRG` / `sykestfstate` / container `tfstate` (created with the CLI before Terraform) |
-
-### NSG rules (`dev-nsg` and `prod-nsg`)
-
-| Rule | Priority | Direction | Source | Port | Action |
-|---|---|---|---|---|---|
-| allow-ssh-inbound | 100 | Inbound | 10.0.0.0/16 (hub range) | 22 | Allow |
-| allow-https-outbound | 200 | Outbound | Any | 443 to Internet | Allow |
-| deny-all-inbound | 4096 | Inbound | Any | Any | Deny |
-
-Outbound traffic falls back to Azure's default rules, so there is no explicit deny-all-outbound rule.
-
----
-
-## Setup
-
-### Prerequisites
-
-- Terraform (`winget install HashiCorp.Terraform` on Windows)
-- Azure CLI, signed in with `az login`
-- An Azure subscription where you can create resources
-
-### 1. Create the remote state backend (once, with the CLI)
-
-```bash
-az group create --name TerraformStateRG --location eastus
-
-az storage account create \
-  --name sykestfstate \
-  --resource-group TerraformStateRG \
-  --location eastus \
-  --sku Standard_LRS \
-  --min-tls-version TLS1_2
-
-az storage container create \
-  --name tfstate \
-  --account-name sykestfstate
-```
-
-Storage account names are globally unique, so use your own name and update the `backend` block in `terraform/providers.tf` to match.
-
-### 2. Set your subscription
-
-```bash
-cd terraform
-# PowerShell
-$env:TF_VAR_subscription_id = az account show --query id -o tsv
-# bash
-export TF_VAR_subscription_id=$(az account show --query id -o tsv)
-```
-
-The ID is passed through the environment, so it never lands in a file. (You can also copy `terraform.tfvars.example` to `terraform.tfvars`, which is gitignored.)
-
-### 3. Run Terraform
-
-```bash
-terraform init      # downloads the provider, configures the backend
-terraform plan      # shows what will be created
-terraform apply     # builds it
-terraform destroy   # tears it down
-```
-
-The VM and Bastion are off by default. To preview them without creating anything:
-
-```bash
-terraform plan -var enable_vm=true -var enable_bastion=true   # plan only
-```
-
-Applying with those switches creates billable resources (Bastion bills hourly while it exists), so only do it for a timed demo and destroy it in the same sitting.
-
 ---
 
 ## Screenshots
@@ -208,18 +280,6 @@ Applying with those switches creates billable resources (Bastion bills hourly wh
 
 Screenshots 07 and 11 show a gap found in review (the dev storage account was still reachable from selected public networks), fixed in code, and re-verified in the portal.
 
----|---|---|
-| 01 | ![](screenshots/01-dev-rg-resources.png) | `dev-rg`: NSG, private endpoint and its NIC, VNet, storage account |
-| 02 | ![](screenshots/02-hub-rg-resources.png) | `hub-rg`: hub VNet |
-| 03 | ![](screenshots/03-prod-rg-resources.png) | `prod-rg`: prod VNet |
-| 04 | ![](screenshots/04-terraform-state-rg.png) | `TerraformStateRG`: the state storage account |
-| 05 | ![](screenshots/05-dev-vnet-resource-visualizer.png) | Resource visualizer: dev VNet linked to hub VNet, NSG and private endpoint |
-| 06 | ![](screenshots/06-dev-nsg-security-rules.png) | `dev-nsg` inbound and outbound rules |
-| 07 | ![](screenshots/07-sykesdevstore-properties.png) | `sykesdevstore`: TLS 1.2, one private endpoint connection, public access limited |
-| 08 | ![](screenshots/08-hub-vnet-peerings.png) | Hub peerings to prod and dev: Connected, Fully Synchronized |
-| 09 | ![](screenshots/09-dev-vnet-peerings.png) | Dev to hub peering: Connected |
-| 10 | ![](screenshots/10-prod-vnet-peerings.png) | Prod to hub peering: Connected |
-
 ---
 
 ## Troubleshooting Log
@@ -229,7 +289,7 @@ Screenshots 07 and 11 show a gap found in review (the dev storage account was st
 | 1 | `terraform init`: `az` executable not found | Azure CLI was on the Ubuntu box, not the Windows machine running Terraform | Installed Azure CLI on Windows and restarted VS Code |
 | 2 | `plan` failed registering resource providers | Free tier lacks permission for automatic registration | Registered Microsoft.Network, Compute and Storage with `az provider register` |
 | 3 | ED25519 SSH key rejected for the VM | Azure Linux VMs accept only RSA keys | Generated a dedicated RSA 4096 key for Azure |
-| 4 | `SkuNotAvailable` for B1s and B1ms | No free-tier B-series capacity in East US or East US 2 | Commented the VM out; code is kept for later |
+| 4 | `SkuNotAvailable` for B1s and B1ms | No free-tier B-series capacity in East US or East US 2 | VM left out; code kept and later moved behind a switch |
 | 5 | Peering "inconsistent result" after changing dev to East US 2 | Peering existed in Azure but was no longer in state | Brought it back with `terraform import` |
 | 6 | Push rejected: provider binary over 100 MB | `.terraform/` was committed before a `.gitignore` existed | Added `.gitignore`, removed the binary from history with `git filter-branch`, force pushed |
 | 7 | Subscription disabled when the free trial credit expired | Free accounts are disabled at 30 days or when the $200 credit runs out | Upgraded to pay-as-you-go; `terraform plan` then showed "No changes", proving state and resources survived |
@@ -241,11 +301,16 @@ The full table with business lessons is in the PDFs.
 
 ---
 
-## Skills Demonstrated
+## What I Would Do Differently Next Time
 
-Infrastructure as Code (Terraform), Azure hub and spoke networking, VNet peering, NSG design, private endpoints, remote state management, importing existing resources into state, Git hygiene for IaC projects, and written troubleshooting documentation.
-
-**Certifications this supports:** AZ-900 (passed September 24, 2026) and CompTIA Security+. It also lines up with the AZ-104 networking domain, which is the next goal.
+1. Plan the IP space first, including the Bastion and firewall subnets, and keep everything in one region.
+2. Create the `.gitignore` (and the tfvars exception) before the first commit.
+3. Write the modules before the second environment exists.
+4. Use one state file per environment, with versioning and soft delete on the state account.
+5. Ship each private endpoint together with its private DNS zone.
+6. Make outbound NSG rules truly default-deny and turn on flow logs.
+7. Set a budget alert before creating anything billable.
+8. Run `fmt`, `validate` and `plan` automatically on every pull request.
 
 ---
 
@@ -259,6 +324,17 @@ Infrastructure as Code (Terraform), Azure hub and spoke networking, VNet peering
 - [ ] Add CI that runs `terraform fmt`, `validate` and `plan` on pull requests
 
 ---
+
+## Skills Demonstrated
+
+Infrastructure as Code (Terraform), Azure hub and spoke networking, VNet peering, NSG design, private endpoints, remote state management, safe refactoring with `moved` blocks, importing existing resources into state, cost control, Git hygiene for IaC projects, and written troubleshooting documentation.
+
+**Certifications this supports:** AZ-900 (passed September 24, 2026) and CompTIA Security+. It also lines up with the AZ-104 networking domain, which is the next goal.
+
+## Documentation
+
+- **[Version 2 write-up (October 2026)](docs/personal-azure-infrastructure-terraform-documentation-v2.pdf)**: module refactor, prod controls, what each component does in Azure, the business problem it solves, and what I would do differently.
+- [Original write-up (September 2026)](docs/personal-azure-infrastructure-terraform-documentation.pdf): the first version, kept for the project history.
 
 ## Related Projects
 
